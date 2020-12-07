@@ -1,0 +1,114 @@
+---
+title: "R Notebook"
+author: Xinyi Xu
+date: 2020/11/20
+output: html_document
+---
+
+```{r}
+rm(list = ls(all.names = TRUE)) # will clear all objects, including hidden objects
+gc()
+```
+
+```{r}
+library(raster)
+library(caret)
+```
+
+```{r}
+# Load the Sentinel-2 data
+s2data <- stack("../../Lab/LabData/S2StackSmall.tif")
+
+# Name the layers of the Sentinel-2 stack
+names(s2data) <- as.character(read.csv("../../Lab/LabData/S2StackSmall_Names.csv")[, 1])
+```
+
+```{r}
+# Plot the Band 3 data
+plot(s2data$B03M)
+```
+
+```{r}
+samples <- read.csv("../../Lab/LabData/Samples.csv")
+
+# Split the data frame into 70-30 by class
+trainx <- list(0)
+evalx <- list(0)
+for (i in 1:8) {
+  cls <- samples[samples$class == i,]
+  n <- floor(0.8 * nrow(cls))
+  train_ind <- sample(seq_len(nrow(cls)), size = n)
+  trainx[[i]] <- cls[train_ind,]
+  evalx[[i]] <- cls[-train_ind,]
+}
+
+# Combine them into training and evaluation data
+trn <- do.call(rbind, trainx)
+eval <- do.call(rbind, evalx)
+```
+
+```{r}
+tc <- trainControl(method = "repeatedcv",
+                   number = 10,
+                   repeats = 5,
+                   allowParallel = TRUE,
+                   verboseIter = TRUE)
+
+nnet.grid <- expand.grid(size = seq(from = 2, to = 10, by = 2),
+                         decay = seq(from = 0.1, to = 0.5, by = 0.1))
+
+rf.grid <- expand.grid(mtry=1:20)
+
+svm.grid <- expand.grid(sigma=seq(from = 0.01, to = 0.10, by = 0.02),
+                        C=seq(from = 2, to = 10, by = 2))
+```
+
+```{r}
+# Train the neural network model
+nnet_model <- train(x = trn[,(5:ncol(trn)-1)], y = as.factor(as.integer(as.factor(trn$class))),
+                    method = "nnet", metric="Accuracy", trainControl = tc, tuneGrid = nnet.grid)
+
+# Train the random forest model
+rf_model <- train(x = trn[,(5:ncol(trn)-1)], y = as.factor(as.integer(as.factor(trn$class))),
+                  method = "rf", metric="Accuracy", trainControl = tc, tuneGrid = rf.grid)
+
+# Train the support vector machines model
+svm_model <- train(x = trn[,(5:ncol(trn)-1)], y = as.factor(as.integer(as.factor(trn$class))),
+                   method = "svmRadialSigma", metric="Accuracy", trainControl = tc, tuneGrid = svm.grid)
+```
+
+```{r}
+# Apply the neural network model to the Sentinel-2 data.
+nnet_prediction <- predict(s2data, model=nnet_model)
+
+# Apply the random forest model to the Sentinel-2 data
+rf_prediction <- predict(s2data, model=rf_model)
+
+# Apply the support vector machines model to the Sentinel-2 data
+svm_prediction <- predict(s2data, model=svm_model)
+
+# Convert the evaluation data into a spatial object using the X and Y coordinates and extract predicted values
+eval.sp <- SpatialPointsDataFrame(coords = cbind(eval$x, eval$y), data = eval,
+                                 proj4string = crs("+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0"))
+```
+
+```{r}
+## Superimpose evaluation points on the predicted classification and extract the values
+
+# neural network
+nnet_Eval <- extract(nnet_prediction, eval.sp)
+# random forest
+rf_Eval <- extract(rf_prediction, eval.sp)
+# support vector machines
+svm_Eval <- extract((svm_prediction), eval.sp)
+
+# Create an error matrix for each of the classifiers
+nnet_errorM <- confusionMatrix(as.factor(nnet_Eval), as.factor(eval$class)) # nnet is a poor classifier, so it will not capture all the classes
+rf_errorM <- confusionMatrix(as.factor(rf_Eval), as.factor(eval$class))
+svm_errorM <- confusionMatrix(as.factor(svm_Eval), as.factor(eval$class))
+
+paste0("Neural net accuracy: ", round(nnet_errorM$overall[1],2))
+paste0("Random Forest accuracy: ", round(rf_errorM$overall[1],2))
+paste0("SVM accuracy: ", round(svm_errorM$overall[1],2))
+```
+
